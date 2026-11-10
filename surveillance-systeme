@@ -1,11 +1,20 @@
 ###################################################################
 # Date : 10/11/2026 17H43
-# Modif : 10/11/2026 18H00
+# Modif : 10/11/2026 18H30
 # Auteur : Bastian THOREZ
 # Script : surveillance systeme
 ###################################################################
  
 SYSTEME=$(uname -s)
+ 
+# --- Chemin de PowerShell (utile sous Windows / Git Bash) ---------------------
+PS=$(command -v powershell.exe || command -v powershell)
+if [[ -z "$PS" ]]; then
+    for chemin in /c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+                  /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe; do
+        [[ -x "$chemin" ]] && PS=$chemin && break
+    done
+fi
  
 # --- Nombre de cœurs -----------------------------------------------------------
 case "$SYSTEME" in
@@ -42,9 +51,13 @@ utilisation_cpu() {
             ;;
         *)
             sleep 1
-            powershell -NoProfile -Command \
-                "[int](Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average" \
-                | tr -d '\r'
+            if [[ -n "$PS" ]]; then
+                "$PS" -NoProfile -Command \
+                    "[int](Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average" \
+                    | tr -d '\r'
+            else
+                echo "N/A"
+            fi
             ;;
     esac
 }
@@ -60,9 +73,13 @@ lister_disques() {
             diskutil list | grep -E "^/dev|^ +[0-9]+:"
             ;;
         *)
-            powershell -NoProfile -Command \
-                "Get-CimInstance Win32_DiskDrive | ForEach-Object { '{0} - {1} Go' -f \$_.Model, [math]::Round(\$_.Size/1GB,1) }" \
-                | tr -d '\r'
+            if [[ -n "$PS" ]]; then
+                "$PS" -NoProfile -Command \
+                    "Get-CimInstance Win32_DiskDrive | ForEach-Object { '{0} - {1} Go' -f \$_.Model, [math]::Round(\$_.Size/1GB,1) }" \
+                    | tr -d '\r'
+            else
+                echo "(liste des disques non disponible)"
+            fi
             ;;
     esac
 }
@@ -79,6 +96,44 @@ espace_disques() {
     }'
 }
  
+# --- Mémoire vive (RAM) en Go et en pourcentage -------------------------------
+# Renvoie deux nombres en Ko : total et disponible
+lire_ram() {
+    case "$SYSTEME" in
+        Linux*)
+            awk '/^MemTotal/ {t=$2} /^MemAvailable/ {d=$2} END {print t, d}' /proc/meminfo
+            ;;
+        Darwin*)
+            local total=$(( $(sysctl -n hw.memsize) / 1024 ))
+            local dispo
+            dispo=$(vm_stat | awk '/page size of/ {ps=$8} /Pages free/ {f=$3} /Pages inactive/ {i=$3} /Pages speculative/ {s=$3} END {printf "%d", (f+i+s)*ps/1024}')
+            echo "$total $dispo"
+            ;;
+        *)
+            if [[ -n "$PS" ]]; then
+                "$PS" -NoProfile -Command \
+                    "\$o = Get-CimInstance Win32_OperatingSystem; '{0} {1}' -f \$o.TotalVisibleMemorySize, \$o.FreePhysicalMemory" \
+                    | tr -d '\r'
+            else
+                # Git Bash sans PowerShell : lecture de /proc/meminfo
+                awk '/^MemTotal/ {t=$2} /^MemFree/ {d=$2} END {print t, d}' /proc/meminfo
+            fi
+            ;;
+    esac
+}
+ 
+affichage_ram() {
+    lire_ram | awk '{
+        total = $1 / 1048576
+        dispo = $2 / 1048576
+        utilise = total - dispo
+        pct = (total > 0) ? utilise * 100 / total : 0
+        printf "Total      : %6.1f Go\n", total
+        printf "Utilisee   : %6.1f Go (%.0f %%)\n", utilise, pct
+        printf "Disponible : %6.1f Go (%.0f %%)\n", dispo, 100 - pct
+    }'
+}
+ 
 DISQUES=$(lister_disques)
  
 # --- Boucle d'affichage -------------------------------------------------------
@@ -92,6 +147,9 @@ while true; do
     echo "Nombre de coeurs : $NB_COEURS"
     echo "Utilisation CPU  : $POURCENT %"
     echo
+    echo "--- Memoire vive (RAM) ---"
+    affichage_ram
+    echo
     echo "--- Disques et partitions ---"
     echo "$DISQUES"
     echo
@@ -100,3 +158,4 @@ while true; do
     echo
     echo "(Ctrl+C pour quitter)"
 done
+ 
