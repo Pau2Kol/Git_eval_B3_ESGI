@@ -1,6 +1,6 @@
 ###################################################################
 # Date : 10/11/2026 17H43
-# Modif : 10/11/2026 
+# Modif : 10/11/2026 18H00
 # Auteur : Bastian THOREZ
 # Script : surveillance systeme
 ###################################################################
@@ -49,16 +49,54 @@ utilisation_cpu() {
     esac
 }
  
+# --- Liste des disques et partitions (identifiée une seule fois) ---------------
+lister_disques() {
+    case "$SYSTEME" in
+        Linux*)
+            lsblk -o NAME,TYPE,SIZE 2>/dev/null | grep -E "NAME|disk|part" \
+                || echo "(lsblk indisponible)"
+            ;;
+        Darwin*)
+            diskutil list | grep -E "^/dev|^ +[0-9]+:"
+            ;;
+        *)
+            powershell -NoProfile -Command \
+                "Get-CimInstance Win32_DiskDrive | ForEach-Object { '{0} - {1} Go' -f \$_.Model, [math]::Round(\$_.Size/1GB,1) }" \
+                | tr -d '\r'
+            ;;
+    esac
+}
+ 
+# --- Espace disque par partition (en Go) --------------------------------------
+espace_disques() {
+    printf '%-22s %9s %9s %9s %6s\n' "Partition" "Total" "Utilise" "Libre" "Util."
+    df -Pk | awk 'NR > 1 && $2 > 0 && $1 !~ /^(tmpfs|devtmpfs|udev|overlay|squashfs|none|shm)/ {
+        total = $2 / 1048576
+        utilise = $3 / 1048576
+        libre = $4 / 1048576
+        pct = (total > 0) ? utilise * 100 / total : 0
+        printf "%-22s %7.1f Go %7.1f Go %7.1f Go %5.0f%%\n", $1, total, utilise, libre, pct
+    }'
+}
+ 
+DISQUES=$(lister_disques)
+ 
 # --- Boucle d'affichage -------------------------------------------------------
 while true; do
     POURCENT=$(utilisation_cpu)
  
     clear
     echo "=============================="
-    echo "   SURVEILLANCE PROCESSEUR"
+    echo "   SURVEILLANCE SYSTEME"
     echo "=============================="
     echo "Nombre de coeurs : $NB_COEURS"
     echo "Utilisation CPU  : $POURCENT %"
+    echo
+    echo "--- Disques et partitions ---"
+    echo "$DISQUES"
+    echo
+    echo "--- Espace disque ---"
+    espace_disques
     echo
     echo "(Ctrl+C pour quitter)"
 done
