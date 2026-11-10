@@ -1,0 +1,161 @@
+###################################################################
+# Date : 10/11/2026 17H43
+# Modif : 10/11/2026 18H30
+# Auteur : Bastian THOREZ
+# Script : surveillance systeme
+###################################################################
+ 
+SYSTEME=$(uname -s)
+ 
+# --- Chemin de PowerShell (utile sous Windows / Git Bash) ---------------------
+PS=$(command -v powershell.exe || command -v powershell)
+if [[ -z "$PS" ]]; then
+    for chemin in /c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+                  /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe; do
+        [[ -x "$chemin" ]] && PS=$chemin && break
+    done
+fi
+ 
+# --- Nombre de cœurs -----------------------------------------------------------
+case "$SYSTEME" in
+    Linux*)  NB_COEURS=$(nproc) ;;
+    Darwin*) NB_COEURS=$(sysctl -n hw.ncpu) ;;
+    *)       NB_COEURS=${NUMBER_OF_PROCESSORS:-inconnu} ;;   # Git Bash (Windows)
+esac
+ 
+# --- Pourcentage d'utilisation du CPU -----------------------------------------
+if [[ "$SYSTEME" == Linux* ]]; then
+    lire_cpu() {
+        read -r _ user nice system idle iowait irq softirq steal _ < /proc/stat
+        TOTAL=$(( user + nice + system + idle + iowait + irq + softirq + steal ))
+        INACTIF=$(( idle + iowait ))
+    }
+    lire_cpu
+    TOTAL_PREC=$TOTAL
+    INACTIF_PREC=$INACTIF
+fi
+ 
+utilisation_cpu() {
+    case "$SYSTEME" in
+        Linux*)
+            sleep 1
+            lire_cpu
+            local dt=$(( TOTAL - TOTAL_PREC ))
+            local di=$(( INACTIF - INACTIF_PREC ))
+            TOTAL_PREC=$TOTAL
+            INACTIF_PREC=$INACTIF
+            if (( dt > 0 )); then echo $(( 100 * (dt - di) / dt )); else echo 0; fi
+            ;;
+        Darwin*)
+            top -l 2 -n 0 | grep "CPU usage" | tail -1 | awk '{print int(100 - $7)}'
+            ;;
+        *)
+            sleep 1
+            if [[ -n "$PS" ]]; then
+                "$PS" -NoProfile -Command \
+                    "[int](Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average" \
+                    | tr -d '\r'
+            else
+                echo "N/A"
+            fi
+            ;;
+    esac
+}
+ 
+# --- Liste des disques et partitions (identifiée une seule fois) ---------------
+lister_disques() {
+    case "$SYSTEME" in
+        Linux*)
+            lsblk -o NAME,TYPE,SIZE 2>/dev/null | grep -E "NAME|disk|part" \
+                || echo "(lsblk indisponible)"
+            ;;
+        Darwin*)
+            diskutil list | grep -E "^/dev|^ +[0-9]+:"
+            ;;
+        *)
+            if [[ -n "$PS" ]]; then
+                "$PS" -NoProfile -Command \
+                    "Get-CimInstance Win32_DiskDrive | ForEach-Object { '{0} - {1} Go' -f \$_.Model, [math]::Round(\$_.Size/1GB,1) }" \
+                    | tr -d '\r'
+            else
+                echo "(liste des disques non disponible)"
+            fi
+            ;;
+    esac
+}
+ 
+# --- Espace disque par partition (en Go) --------------------------------------
+espace_disques() {
+    printf '%-22s %9s %9s %9s %6s\n' "Partition" "Total" "Utilise" "Libre" "Util."
+    df -Pk | awk 'NR > 1 && $2 > 0 && $1 !~ /^(tmpfs|devtmpfs|udev|overlay|squashfs|none|shm)/ {
+        total = $2 / 1048576
+        utilise = $3 / 1048576
+        libre = $4 / 1048576
+        pct = (total > 0) ? utilise * 100 / total : 0
+        printf "%-22s %7.1f Go %7.1f Go %7.1f Go %5.0f%%\n", $1, total, utilise, libre, pct
+    }'
+}
+ 
+# --- Mémoire vive (RAM) en Go et en pourcentage -------------------------------
+# Renvoie deux nombres en Ko : total et disponible
+lire_ram() {
+    case "$SYSTEME" in
+        Linux*)
+            awk '/^MemTotal/ {t=$2} /^MemAvailable/ {d=$2} END {print t, d}' /proc/meminfo
+            ;;
+        Darwin*)
+            local total=$(( $(sysctl -n hw.memsize) / 1024 ))
+            local dispo
+            dispo=$(vm_stat | awk '/page size of/ {ps=$8} /Pages free/ {f=$3} /Pages inactive/ {i=$3} /Pages speculative/ {s=$3} END {printf "%d", (f+i+s)*ps/1024}')
+            echo "$total $dispo"
+            ;;
+        *)
+            if [[ -n "$PS" ]]; then
+                "$PS" -NoProfile -Command \
+                    "\$o = Get-CimInstance Win32_OperatingSystem; '{0} {1}' -f \$o.TotalVisibleMemorySize, \$o.FreePhysicalMemory" \
+                    | tr -d '\r'
+            else
+                # Git Bash sans PowerShell : lecture de /proc/meminfo
+                awk '/^MemTotal/ {t=$2} /^MemFree/ {d=$2} END {print t, d}' /proc/meminfo
+            fi
+            ;;
+    esac
+}
+ 
+affichage_ram() {
+    lire_ram | awk '{
+        total = $1 / 1048576
+        dispo = $2 / 1048576
+        utilise = total - dispo
+        pct = (total > 0) ? utilise * 100 / total : 0
+        printf "Total      : %6.1f Go\n", total
+        printf "Utilisee   : %6.1f Go (%.0f %%)\n", utilise, pct
+        printf "Disponible : %6.1f Go (%.0f %%)\n", dispo, 100 - pct
+    }'
+}
+ 
+DISQUES=$(lister_disques)
+ 
+# --- Boucle d'affichage -------------------------------------------------------
+while true; do
+    POURCENT=$(utilisation_cpu)
+ 
+    clear
+    echo "=============================="
+    echo "   SURVEILLANCE SYSTEME"
+    echo "=============================="
+    echo "Nombre de coeurs : $NB_COEURS"
+    echo "Utilisation CPU  : $POURCENT %"
+    echo
+    echo "--- Memoire vive (RAM) ---"
+    affichage_ram
+    echo
+    echo "--- Disques et partitions ---"
+    echo "$DISQUES"
+    echo
+    echo "--- Espace disque ---"
+    espace_disques
+    echo
+    echo "(Ctrl+C pour quitter)"
+done
+ 
