@@ -1,0 +1,64 @@
+###################################################################
+# Date : 10/11/2026 17H43
+# Modif : 10/11/2026 
+# Auteur : Bastian THOREZ
+# Script : surveillance systeme
+###################################################################
+ 
+SYSTEME=$(uname -s)
+ 
+# --- Nombre de cœurs -----------------------------------------------------------
+case "$SYSTEME" in
+    Linux*)  NB_COEURS=$(nproc) ;;
+    Darwin*) NB_COEURS=$(sysctl -n hw.ncpu) ;;
+    *)       NB_COEURS=${NUMBER_OF_PROCESSORS:-inconnu} ;;   # Git Bash (Windows)
+esac
+ 
+# --- Pourcentage d'utilisation du CPU -----------------------------------------
+if [[ "$SYSTEME" == Linux* ]]; then
+    lire_cpu() {
+        read -r _ user nice system idle iowait irq softirq steal _ < /proc/stat
+        TOTAL=$(( user + nice + system + idle + iowait + irq + softirq + steal ))
+        INACTIF=$(( idle + iowait ))
+    }
+    lire_cpu
+    TOTAL_PREC=$TOTAL
+    INACTIF_PREC=$INACTIF
+fi
+ 
+utilisation_cpu() {
+    case "$SYSTEME" in
+        Linux*)
+            sleep 1
+            lire_cpu
+            local dt=$(( TOTAL - TOTAL_PREC ))
+            local di=$(( INACTIF - INACTIF_PREC ))
+            TOTAL_PREC=$TOTAL
+            INACTIF_PREC=$INACTIF
+            if (( dt > 0 )); then echo $(( 100 * (dt - di) / dt )); else echo 0; fi
+            ;;
+        Darwin*)
+            top -l 2 -n 0 | grep "CPU usage" | tail -1 | awk '{print int(100 - $7)}'
+            ;;
+        *)
+            sleep 1
+            powershell -NoProfile -Command \
+                "[int](Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average" \
+                | tr -d '\r'
+            ;;
+    esac
+}
+ 
+# --- Boucle d'affichage -------------------------------------------------------
+while true; do
+    POURCENT=$(utilisation_cpu)
+ 
+    clear
+    echo "=============================="
+    echo "   SURVEILLANCE PROCESSEUR"
+    echo "=============================="
+    echo "Nombre de coeurs : $NB_COEURS"
+    echo "Utilisation CPU  : $POURCENT %"
+    echo
+    echo "(Ctrl+C pour quitter)"
+done
